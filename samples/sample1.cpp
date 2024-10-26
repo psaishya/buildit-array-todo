@@ -3,7 +3,7 @@
 
 // BArray Program to be compiled
 void test_program(builder::dyn_var<int*> arr1, int dim1, int dim2, int dim3) {
-
+	barray::current_device=barray::DEVICE_HOST;
 	// Declare 3 arrays, with 3 dimensions
 	// The first arrays used a buffer passed in
 	barray::barray<int> y(arr1, {dim1, dim2, dim3});
@@ -15,8 +15,24 @@ void test_program(builder::dyn_var<int*> arr1, int dim1, int dim2, int dim3) {
 	// Initialize W to all ones
 	w = 1;
 
-	// Compute Z + W and store it in Y
-	y = z + w;
+	z.finalize();
+
+// //GPU version
+// 	w.to_device();
+// 	z.to_device();
+// 	y.allocate_device();
+
+// 	barray::run_on_gpu([&](){
+// 		y = 23* z + 7* w + 6;
+// 	});
+
+//CPU version
+	y = 23* z + 7* w + 6;
+
+
+	y.finalize();
+	z.destroy();
+	w.destroy();
 
 }
 

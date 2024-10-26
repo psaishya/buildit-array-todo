@@ -13,6 +13,9 @@ std::vector<int> match_expr_sizes(const std::vector<int> size1, const std::vecto
 
 
 	// TODO 3: Make sure the sizes of all the dimensions are equal
+	for(builder::static_var <unsigned int> i=0;i<size1.size();i++){
+		assert(size1[i]==size2[i] && "Dimensions of arrays do not agree for operation");
+	}
 
 	return size1;
 }

@@ -31,6 +31,12 @@ struct barray_expr {
 	virtual const std::vector<int> get_expr_size(void) const {
 		return {};
 	}
+	virtual const bool is_constant(void) const{
+		return false;
+	}
+	virtual const T constant_val(void) const{
+		return 0;
+	}
 };
 
 template <typename T>
@@ -83,21 +89,27 @@ struct barray {
 	// Function to allocate memory on the GPU
 	void allocate_device(std::vector<int> sizes) {
 		if (device_allocated) return;
-		m_device_arr = runtime::cuda_malloc((int)sizeof(T) * get_total_size());
+		m_device_arr = runtime::cuda_malloc((int)sizeof(T) * get_total_size()); 
 		device_allocated = 1;
 	}
 
+	void allocate_device(){
+		allocate_device(m_sizes);
+	}
 	// Function to transfer the array to the GPU
 	void to_device() {
 		allocate_device(m_sizes);
 		if (current_storage == DEVICE_GPU) return;
 		runtime::cuda_memcpy_to_device(m_device_arr, m_arr, (int)sizeof(T) * get_total_size());	
+		current_storage=DEVICE_GPU;
 	}
 
 	// Function to transfer the array back to the HOST
 	void to_host() {
 		if (current_storage == DEVICE_HOST) return;
 		runtime::cuda_memcpy_to_host(m_arr, m_device_arr, (int)sizeof(T) * get_total_size());	
+		current_storage=DEVICE_HOST;
+
 	}
 
 	// Delete the default implementations of the operators
@@ -117,29 +129,57 @@ struct barray {
 			return;
 		}
 
+		
+		// TODO 5: Map loop nests to GPU if current device is GPU
+		if(current_device==DEVICE_GPU && index==0){
+			builder::annotate(CUDA_KERNEL);
+		}
 		builder::dyn_var<int> i = 0;
 		indices.push_back(i.addr());
 
-		// TODO 5: Map loop nests to GPU if current device is GPU
-
 		// TODO 2: Recursively induce loops for all dimensions
-		induce_loop_at(indices, rhs);
+		for(;i<m_sizes[index];i++){
+			induce_loop_at(indices, rhs);
+
+		}
 	}
 
 	// Assignment operator overloads
 	void operator=(const barray_expr<T> & rhs) {
 		match_expr_sizes(m_sizes, rhs.get_expr_size());
+		if(current_device==DEVICE_GPU && !device_allocated){
+			assert(false && "Need to allocate array on device");
+		}
+		if (rhs.is_constant()){
+			is_constant=true;
+			constant_val=rhs.constant_val();
+			current_storage = current_device;
+			return;
+
+		}
+
 		induce_loop_at({}, rhs);
 		is_constant = false;
+		constant_val=0;
 		current_storage = current_device;
 	}
 	
 	void operator=(const T& value) {
 		int total_size = get_total_size();
 
-		// TODO 1: Initialize all elements of the array to value
+		// // TODO 1: Initialize all elements of the array to value
+
+		//  for(builder::dyn_var<int> i=0; i<total_size; i++){
+		// 	m_arr[i]=value;
+		//  }
+
+
+		
 		
 		// TODO 4: Optimize arrays initialized to constants
+		is_constant=1;
+		constant_val=value; 
+
 		current_storage = DEVICE_HOST;
 
 	}
@@ -164,9 +204,17 @@ struct barray {
 	// it is optimized
 	void finalize() {
 		if (!is_constant) return;
-		*this = barray_expr_const<T>((T)constant_val);
-	}
+		// *this = barray_expr_const<T>((T)constant_val);
+		for (builder::dyn_var<int> i=0; i<get_total_size(); i++){
+			m_arr[i]=constant_val;
+		}
+		is_constant=false;
+		constant_val=0;   
 
+	}
+	void destroy(){
+		runtime::free(m_arr);
+	}
 };
 
 
@@ -185,6 +233,12 @@ struct barray_expr_const: public barray_expr<T> {
 	const std::vector<int> get_expr_size(void) const {
 		return {};
 	}
+	virtual const bool is_constant(void) const{
+		return true;
+	}
+	virtual const T constant_val(void) const{
+		return m_value;
+	}
 };
 
 // RHS class for holding array operands
@@ -195,18 +249,31 @@ struct barray_expr_array: public barray_expr<T>{
 
 	const builder::dyn_var<T> get_value_at(std::vector<builder::dyn_var<int>*> indices) const {
 		// TODO 6: Make sure the array is on the GPU if requested from GPU
+		assert(current_device==m_array.current_storage && "Array storage and device don't match");
 
 		// TODO 4.2: Optimize arrays initialized to constants
+		if (m_array.is_constant){
+			return m_array.constant_val;
+		}
+
 		if (current_device == DEVICE_HOST)
 			return const_cast<builder::dyn_var<T*>&>(m_array.m_arr)[m_array.compute_flat_index(indices)];
 		else
 			return const_cast<builder::dyn_var<T*>&>(m_array.m_device_arr)[m_array.compute_flat_index(indices)];
 	}
 
+
 	const std::vector<int> get_expr_size(void) const {
 		return m_array.m_sizes;
 	}
 	
+
+	virtual const bool is_constant(void) const{
+		return m_array.is_constant;
+	}
+	virtual const T constant_val(void) const{
+		return m_array.constant_val;
+	}
 };
 
 // Non leaf RHS expr classes
@@ -231,6 +298,14 @@ struct barray_expr_add: public barray_expr<T> {
 	const builder::dyn_var<T> get_value_at(std::vector<builder::dyn_var<int>*> indices) const {
 		return expr1.get_value_at(indices) + expr2.get_value_at(indices);
 	}
+
+	virtual const bool is_constant(void) const{
+		return expr1.is_constant() && expr2.is_constant();
+	}
+	virtual const T constant_val(void) const{
+		return expr1.constant_val()+expr2.constant_val();
+	}
+	
 };
 
 
@@ -254,6 +329,13 @@ struct barray_expr_mul: public barray_expr<T> {
 	const builder::dyn_var<T> get_value_at(std::vector<builder::dyn_var<int>*> indices) const {
 		return expr1.get_value_at(indices) * expr2.get_value_at(indices);
 	}
+	virtual const bool is_constant(void) const{
+		return expr1.is_constant() && expr2.is_constant();
+	}
+	virtual const T constant_val(void) const{
+		return expr1.constant_val()*expr2.constant_val();
+	}
+	
 };
 
 // Class for cross product of two expressions
@@ -285,7 +367,11 @@ struct barray_expr_cross: public barray_expr<T> {
 		std::vector<builder::dyn_var<int>*> indices2 = {i.addr(), indices[1]};
 		int len = expr1.get_expr_size()[1];
 
-		// TODO: Implement cross product operator		
+		// TODO: Implement cross product operator
+		for(;i<len;i++){
+			sum+=expr1.get_value_at(indices1)*expr2.get_value_at(indices2);
+		}
+				  
 
 		return sum;
 	}
